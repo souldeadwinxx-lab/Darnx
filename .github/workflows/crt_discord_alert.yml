@@ -8,27 +8,35 @@ on:
 jobs:
   check-signal:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      # 1. 저장소 가져오기
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Python 설정
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # 3. requirements.txt 설치
       - name: Install dependencies
         run: pip install -r .github/workflows/requirements.txt
 
+      # 4. 이전 알림 상태 복원
       - name: Restore alert-state cache
         uses: actions/cache@v4
         with:
-          path: last_alert_state.json
+          path: .github/workflows/last_alert_state.json
           key: crt-alert-state
 
+      # 5. 신호 확인 실행
       - name: Run signal check
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          INSTRUMENT: XAU/USD
+          INSTRUMENT: "XAU/USD"
           ACCOUNT_EQUITY: "10000"
           RISK_PERCENT: "0.5"
         run: python .github/workflows/crt_discord_alert.py --once
