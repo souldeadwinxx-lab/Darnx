@@ -1,10 +1,9 @@
 name: CRT Discord Alert
 
-# 15분마다 자동 실행 (GitHub 무료 public repo는 Actions 시간이 무제한)
 on:
   schedule:
     - cron: "*/15 * * * *"
-  workflow_dispatch: {}   # Actions 탭에서 수동으로도 실행 가능
+  workflow_dispatch: {}
 
 jobs:
   check-signal:
@@ -17,9 +16,9 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r .github/workflows/requirements.txt
 
-      - name: Restore alert-state cache (중복 알림 방지용)
+      - name: Restore alert-state cache
         uses: actions/cache@v4
         with:
           path: last_alert_state.json
@@ -32,4 +31,4 @@ jobs:
           INSTRUMENT: XAU/USD
           ACCOUNT_EQUITY: "10000"
           RISK_PERCENT: "0.5"
-        run: python crt_discord_alert.py --once
+        run: python .github/workflows/crt_discord_alert.py --once
