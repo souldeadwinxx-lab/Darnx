@@ -3,7 +3,7 @@ name: CRT Discord Alert
 on:
   schedule:
     - cron: "*/15 * * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
   check-signal:
@@ -18,24 +18,23 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Check files
+      - name: Show repository files
         run: |
-          echo "현재 위치:"
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          echo "Current directory:"
           pwd
-          echo "파일 목록:"
-          ls -la
-          echo "requirements.txt 확인:"
-          ls -l requirements.txt
-          echo "Python 파일 확인:"
-          ls -l crt_discord_alert.py
+          echo "Root files:"
+          ls -la "$GITHUB_WORKSPACE"
 
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r "$GITHUB_WORKSPACE/requirements.txt"
 
       - name: Restore alert-state cache
         uses: actions/cache@v4
         with:
-          path: last_alert_state.json
+          path: "$GITHUB_WORKSPACE/last_alert_state.json"
           key: crt-alert-state
 
       - name: Run signal check
@@ -45,4 +44,5 @@ jobs:
           INSTRUMENT: "XAU/USD"
           ACCOUNT_EQUITY: "10000"
           RISK_PERCENT: "0.5"
-        run: python crt_discord_alert.py --once
+        run: |
+          python "$GITHUB_WORKSPACE/crt_discord_alert.py" --once
