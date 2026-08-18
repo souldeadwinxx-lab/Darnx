@@ -1,12 +1,3 @@
-"""
-ICT CRT 알림 전용 봇
-Twelve Data 시세 + Discord 알림
-
-실제 주문은 넣지 않습니다.
-CRT(레인지 + 스윕 + MSS + FVG) 신호가 발생하면
-Discord로 진입가 / SL / TP / 참고용 포지션 사이즈를 알려줍니다.
-"""
-
 import os
 import json
 import time
@@ -20,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ============================================================
-# 환경변수
+# 설정
 # ============================================================
 
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
@@ -28,15 +19,11 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 INSTRUMENT = os.getenv("INSTRUMENT", "XAU/USD")
 
-ACCOUNT_EQUITY = float(os.getenv("ACCOUNT_EQUITY", "10000"))
-RISK_PERCENT = float(os.getenv("RISK_PERCENT", "0.5"))
-
-# ============================================================
-# 전략 설정
-# ============================================================
-
 RANGE_INTERVAL = "4h"
 ENTRY_INTERVAL = "15min"
+
+ACCOUNT_EQUITY = float(os.getenv("ACCOUNT_EQUITY", "10000"))
+RISK_PERCENT = float(os.getenv("RISK_PERCENT", "0.5"))
 
 RANGE_LOOKBACK = 3
 MAX_RANGE_AGE_BARS = 30
@@ -46,20 +33,15 @@ SWING_LR = 3
 
 MIN_FVG_POINTS = 0.5
 SWEEP_BUFFER_PCT = 0.0002
+MAX_SCAN_BARS = 40
 SL_BUFFER_PCT = 0.0003
 
-MAX_SCAN_BARS = 40
 RR_RATIO = 2.0
-
 USE_RANGE_TP = False
 
 USE_ATR_FILTER = True
 ATR_LEN = 14
 ATR_SPIKE_MULT = 2.0
-
-# ============================================================
-# 파일 / API
-# ============================================================
 
 STATE_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -70,7 +52,7 @@ TWELVEDATA_HOST = "https://api.twelvedata.com"
 
 
 # ============================================================
-# 안전성 검사
+# 안전장치
 # ============================================================
 
 def safety_precheck():
@@ -79,19 +61,12 @@ def safety_precheck():
             "TWELVEDATA_API_KEY가 설정되지 않았습니다."
         )
 
-    if not DISCORD_WEBHOOK_URL:
-        print(
-            "[경고] DISCORD_WEBHOOK_URL이 없습니다. "
-            "Discord 알림은 전송되지 않습니다."
-        )
-
 
 # ============================================================
 # Twelve Data
 # ============================================================
 
 def fetch_candles(symbol, interval, outputsize=300):
-
     url = f"{TWELVEDATA_HOST}/time_series"
 
     params = {
@@ -118,53 +93,42 @@ def fetch_candles(symbol, interval, outputsize=300):
             f"Twelve Data 오류: {data.get('message')}"
         )
 
-    values = data.get("values")
+    values = data.get("values", [])
 
     if not values:
         raise RuntimeError(
-            f"Twelve Data에서 {symbol} {interval} 데이터를 받지 못했습니다."
+            f"Twelve Data 데이터 없음: {symbol} / {interval}"
         )
 
     rows = []
 
-    for candle in values:
-
+    for v in values:
         rows.append({
-            "time": pd.to_datetime(candle["datetime"]),
-            "open": float(candle["open"]),
-            "high": float(candle["high"]),
-            "low": float(candle["low"]),
-            "close": float(candle["close"]),
+            "time": pd.to_datetime(v["datetime"]),
+            "open": float(v["open"]),
+            "high": float(v["high"]),
+            "low": float(v["low"]),
+            "close": float(v["close"]),
         })
 
-    df = pd.DataFrame(rows)
-
     return (
-        df
+        pd.DataFrame(rows)
         .sort_values("time")
         .reset_index(drop=True)
     )
 
 
 # ============================================================
-# H4 Range + Trend
+# Range + Trend
 # ============================================================
 
 def compute_range_and_trend(h4_df):
-
     df = h4_df.copy()
 
-    df["ema"] = (
-        df["close"]
-        .ewm(
-            span=TREND_EMA_LEN,
-            adjust=False
-        )
-        .mean()
-    )
-
-    if len(df) < RANGE_LOOKBACK + 2:
-        raise RuntimeError("H4 데이터가 부족합니다.")
+    df["ema"] = df["close"].ewm(
+        span=TREND_EMA_LEN,
+        adjust=False
+    ).mean()
 
     window = df.iloc[
         -(RANGE_LOOKBACK + 1):-1
@@ -175,7 +139,7 @@ def compute_range_and_trend(h4_df):
 
     ema_now = df["ema"].iloc[-1]
 
-    if len(df) >= 5:
+    if len(df) > 5:
         ema_prev = df["ema"].iloc[-5]
     else:
         ema_prev = df["ema"].iloc[0]
@@ -208,35 +172,29 @@ def compute_range_and_trend(h4_df):
 # ============================================================
 
 def compute_atr(df, length=14):
-
     high = df["high"]
     low = df["low"]
     close = df["close"]
 
-    previous_close = close.shift(1)
+    prev_close = close.shift(1)
 
-    true_range = pd.concat(
+    tr = pd.concat(
         [
             high - low,
-            (high - previous_close).abs(),
-            (low - previous_close).abs(),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
         ],
         axis=1
     ).max(axis=1)
 
-    return true_range.rolling(length).mean()
+    return tr.rolling(length).mean()
 
 
 # ============================================================
 # Bullish FVG
 # ============================================================
 
-def find_bull_fvg(
-    m15,
-    sweep_idx,
-    mss_idx
-):
-
+def find_bull_fvg(m15, sweep_idx, mss_idx):
     end = min(
         mss_idx,
         sweep_idx + MAX_SCAN_BARS
@@ -246,15 +204,12 @@ def find_bull_fvg(
         sweep_idx + 2,
         end
     ):
-
         high_old = m15["high"].iloc[i - 2]
         low_new = m15["low"].iloc[i]
 
-        gap = low_new - high_old
-
         if (
             low_new > high_old
-            and gap >= MIN_FVG_POINTS
+            and low_new - high_old >= MIN_FVG_POINTS
         ):
             return low_new, high_old
 
@@ -265,12 +220,7 @@ def find_bull_fvg(
 # Bearish FVG
 # ============================================================
 
-def find_bear_fvg(
-    m15,
-    sweep_idx,
-    mss_idx
-):
-
+def find_bear_fvg(m15, sweep_idx, mss_idx):
     end = min(
         mss_idx,
         sweep_idx + MAX_SCAN_BARS
@@ -280,15 +230,12 @@ def find_bear_fvg(
         sweep_idx + 2,
         end
     ):
-
         low_old = m15["low"].iloc[i - 2]
         high_new = m15["high"].iloc[i]
 
-        gap = low_old - high_new
-
         if (
             high_new < low_old
-            and gap >= MIN_FVG_POINTS
+            and low_old - high_new >= MIN_FVG_POINTS
         ):
             return low_old, high_new
 
@@ -296,7 +243,7 @@ def find_bear_fvg(
 
 
 # ============================================================
-# CRT Signal Scan
+# CRT Signal
 # ============================================================
 
 def scan_for_signal(
@@ -307,7 +254,6 @@ def scan_for_signal(
     trend_down,
     range_bar_time
 ):
-
     left = SWING_LR
     right = SWING_LR
 
@@ -318,13 +264,11 @@ def scan_for_signal(
 
     bull_sweep_on = False
     bull_mss = False
-
     bull_sweep_level = None
     bull_sweep_idx = None
 
     bear_sweep_on = False
     bear_mss = False
-
     bear_sweep_level = None
     bear_sweep_idx = None
 
@@ -364,7 +308,7 @@ def scan_for_signal(
                 )
 
         # ----------------------------------------------------
-        # Range freshness
+        # Range age
         # ----------------------------------------------------
 
         bars_since_range = (
@@ -380,7 +324,7 @@ def scan_for_signal(
         )
 
         # ----------------------------------------------------
-        # Bullish CRT
+        # Bullish setup
         # ----------------------------------------------------
 
         if range_fresh and trend_up and not bull_mss:
@@ -392,11 +336,8 @@ def scan_for_signal(
                     < range_low - sweep_buffer
                     and row["close"] > range_low
                 ):
-
                     bull_sweep_on = True
-
                     bull_sweep_level = row["low"]
-
                     bull_sweep_idx = i
 
             else:
@@ -436,7 +377,7 @@ def scan_for_signal(
                     bull_sweep_on = False
 
         # ----------------------------------------------------
-        # Bearish CRT
+        # Bearish setup
         # ----------------------------------------------------
 
         if range_fresh and trend_down and not bear_mss:
@@ -448,11 +389,8 @@ def scan_for_signal(
                     > range_high + sweep_buffer
                     and row["close"] < range_high
                 ):
-
                     bear_sweep_on = True
-
                     bear_sweep_level = row["high"]
-
                     bear_sweep_idx = i
 
             else:
@@ -495,25 +433,21 @@ def scan_for_signal(
 
 
 # ============================================================
-# Alert State
+# State
 # ============================================================
 
 def load_state():
-
     if os.path.exists(STATE_FILE):
 
         try:
-
             with open(
                 STATE_FILE,
                 "r",
                 encoding="utf-8"
-            ) as file:
-
-                return json.load(file)
+            ) as f:
+                return json.load(f)
 
         except Exception:
-
             pass
 
     return {
@@ -522,16 +456,14 @@ def load_state():
 
 
 def save_state(state):
-
     with open(
         STATE_FILE,
         "w",
         encoding="utf-8"
-    ) as file:
-
+    ) as f:
         json.dump(
             state,
-            file,
+            f,
             ensure_ascii=False,
             indent=2
         )
@@ -542,12 +474,11 @@ def save_state(state):
 # ============================================================
 
 def send_discord(message):
-
     print(message.replace("**", ""))
 
     if not DISCORD_WEBHOOK_URL:
         print(
-            "[경고] Discord Webhook URL이 없습니다."
+            "[경고] DISCORD_WEBHOOK_URL이 없습니다."
         )
         return
 
@@ -555,28 +486,25 @@ def send_discord(message):
 
         response = requests.post(
             DISCORD_WEBHOOK_URL,
-            json={
-                "content": message
-            },
+            json={"content": message},
             timeout=15
         )
 
         if response.status_code >= 400:
-
             print(
-                f"[경고] Discord HTTP {response.status_code}: "
+                f"[경고] Discord 전송 실패 "
+                f"HTTP {response.status_code}: "
                 f"{response.text}"
             )
 
-    except Exception as error:
-
+    except Exception as e:
         print(
-            f"[경고] Discord 전송 실패: {error}"
+            f"[경고] Discord 전송 실패: {e}"
         )
 
 
 # ============================================================
-# One Run
+# Main signal check
 # ============================================================
 
 def run_once():
@@ -586,12 +514,12 @@ def run_once():
     state = load_state()
 
     print(
-        f"[INFO] Instrument: {INSTRUMENT}"
+        f"[INFO] Checking {INSTRUMENT}"
     )
 
-    print(
-        "[INFO] H4 데이터 요청 중..."
-    )
+    # --------------------------------------------------------
+    # H4
+    # --------------------------------------------------------
 
     h4 = fetch_candles(
         INSTRUMENT,
@@ -602,9 +530,9 @@ def run_once():
         )
     )
 
-    print(
-        "[INFO] M15 데이터 요청 중..."
-    )
+    # --------------------------------------------------------
+    # M15
+    # --------------------------------------------------------
 
     m15 = fetch_candles(
         INSTRUMENT,
@@ -616,13 +544,10 @@ def run_once():
         len(h4) < TREND_EMA_LEN + 5
         or len(m15) < 60
     ):
-
         print(
-            "캔들 데이터 부족. 스킵."
+            "[INFO] 캔들 데이터 부족. 스킵."
         )
-
         save_state(state)
-
         return
 
     # --------------------------------------------------------
@@ -652,11 +577,10 @@ def run_once():
             and atr_avg > 0
             and atr_now >= atr_avg * ATR_SPIKE_MULT
         ):
-
             vol_spiking = True
 
     # --------------------------------------------------------
-    # Range / Trend
+    # Range / trend
     # --------------------------------------------------------
 
     (
@@ -674,139 +598,151 @@ def run_once():
     )
 
     # --------------------------------------------------------
-    # Signal
+    # Scan
     # --------------------------------------------------------
 
-    if not vol_spiking:
+    if vol_spiking:
 
-        signal = scan_for_signal(
-            m15,
-            range_high,
-            range_low,
-            trend_up,
-            trend_down,
-            range_bar_time
+        print(
+            "[INFO] ATR spike filter로 스킵."
         )
 
-        if signal is None:
+        save_state(state)
+        return
 
-            print(
-                "[INFO] 현재 CRT 신호 없음."
+    signal = scan_for_signal(
+        m15,
+        range_high,
+        range_low,
+        trend_up,
+        trend_down,
+        range_bar_time
+    )
+
+    if signal is None:
+
+        print(
+            "[INFO] CRT 신호 없음."
+        )
+
+        save_state(state)
+        return
+
+    # --------------------------------------------------------
+    # Duplicate alert check
+    # --------------------------------------------------------
+
+    bar_time_iso = (
+        signal["bar_time"].isoformat()
+    )
+
+    if (
+        bar_time_iso
+        == state.get("last_alert_bar_time")
+    ):
+
+        print(
+            "[INFO] 이미 알림을 보낸 신호입니다."
+        )
+
+        save_state(state)
+        return
+
+    # --------------------------------------------------------
+    # Entry / SL / TP
+    # --------------------------------------------------------
+
+    entry = signal["entry"]
+    sl = signal["sl"]
+
+    sl_dist = abs(
+        entry - sl
+    )
+
+    if sl_dist <= 0:
+
+        print(
+            "[ERROR] SL distance가 0입니다."
+        )
+
+        return
+
+    if USE_RANGE_TP:
+
+        if signal["side"] == "long":
+            tp = signal["range_low"]
+        else:
+            tp = signal["range_high"]
+
+    else:
+
+        if signal["side"] == "long":
+
+            tp = (
+                entry
+                + sl_dist * RR_RATIO
             )
 
         else:
 
-            bar_time_iso = (
-                signal["bar_time"].isoformat()
+            tp = (
+                entry
+                - sl_dist * RR_RATIO
             )
 
-            if (
-                bar_time_iso
-                == state.get("last_alert_bar_time")
-            ):
+    # --------------------------------------------------------
+    # Position size
+    # --------------------------------------------------------
 
-                print(
-                    "[INFO] 이미 알림을 보낸 신호입니다."
-                )
+    risk_amount = (
+        ACCOUNT_EQUITY
+        * RISK_PERCENT
+        / 100
+    )
 
-            else:
+    units = (
+        risk_amount
+        / sl_dist
+    )
 
-                entry = signal["entry"]
-                sl = signal["sl"]
+    # --------------------------------------------------------
+    # Discord message
+    # --------------------------------------------------------
 
-                sl_distance = abs(
-                    entry - sl
-                )
-
-                if sl_distance <= 0:
-
-                    print(
-                        "[경고] SL 거리 계산 오류."
-                    )
-
-                else:
-
-                    if USE_RANGE_TP:
-
-                        if signal["side"] == "long":
-
-                            tp = signal["range_low"]
-
-                        else:
-
-                            tp = signal["range_high"]
-
-                    else:
-
-                        if signal["side"] == "long":
-
-                            tp = (
-                                entry
-                                + sl_distance * RR_RATIO
-                            )
-
-                        else:
-
-                            tp = (
-                                entry
-                                - sl_distance * RR_RATIO
-                            )
-
-                    risk_amount = (
-                        ACCOUNT_EQUITY
-                        * RISK_PERCENT
-                        / 100
-                    )
-
-                    units = (
-                        risk_amount
-                        / sl_distance
-                    )
-
-                    if signal["side"] == "long":
-
-                        side_kr = "🟢 롱"
-
-                    else:
-
-                        side_kr = "🔴 숏"
-
-                    message = (
-                        f"**{side_kr} 신호 발생 — "
-                        f"{INSTRUMENT}**\n"
-                        f"진입가: {entry:.2f}\n"
-                        f"SL: {sl:.2f}\n"
-                        f"TP: {tp:.2f}\n"
-                        f"참고 수량(가상): {units:.2f}\n"
-                        f"리스크: {RISK_PERCENT}% "
-                        f"(약 ${risk_amount:.2f})\n"
-                        f"가상 자본: "
-                        f"${ACCOUNT_EQUITY:,.0f}\n"
-                        f"⚠️ 자동 주문 없음 — 직접 체결하세요."
-                    )
-
-                    send_discord(message)
-
-                    state[
-                        "last_alert_bar_time"
-                    ] = bar_time_iso
-
+    if signal["side"] == "long":
+        side_kr = "🟢 롱"
     else:
+        side_kr = "🔴 숏"
 
-        print(
-            "[INFO] ATR 급등 조건으로 이번 신호 검색을 건너뜁니다."
-        )
+    message = (
+        f"**{side_kr} 신호 발생 — {INSTRUMENT}**\n"
+        f"진입가: {entry:.2f}\n"
+        f"SL: {sl:.2f}\n"
+        f"TP: {tp:.2f}\n"
+        f"참고 수량(가상): {units:.2f}\n"
+        f"리스크: {RISK_PERCENT}% "
+        f"(약 ${risk_amount:.2f})\n"
+        f"가상 자본: ${ACCOUNT_EQUITY:,.0f}\n"
+        f"⚠️ 자동 주문 없음 — 직접 체결하세요."
+    )
+
+    send_discord(message)
+
+    # --------------------------------------------------------
+    # Save state
+    # --------------------------------------------------------
+
+    state["last_alert_bar_time"] = bar_time_iso
 
     save_state(state)
 
     print(
-        f"[INFO] 완료: "
-        f"{datetime.now(timezone.utc).isoformat()}"
+        "[INFO] Alert state 저장 완료."
     )
 
 
 # ============================================================
-# Loop
+# Loop mode
 # ============================================================
 
 def run_loop(interval_sec=60):
@@ -818,20 +754,19 @@ def run_loop(interval_sec=60):
     while True:
 
         try:
-
             run_once()
 
-        except Exception as error:
+        except Exception as e:
 
             print(
-                f"[에러] {error}"
+                f"[에러] {e}"
             )
 
         time.sleep(interval_sec)
 
 
 # ============================================================
-# Main
+# Entry point
 # ============================================================
 
 if __name__ == "__main__":
@@ -851,9 +786,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.loop:
-
         run_loop()
-
     else:
-
         run_once()
